@@ -9,12 +9,13 @@ from utils import helpers
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="ClearFeed Insights Agent",
-    page_icon="🔍",
+    page_title="ClearFeed Insights",
+    page_icon="📊", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# Apply the Theme
 helpers.apply_custom_style()
 
 # --- STATE ---
@@ -29,38 +30,47 @@ if "collections_list" not in st.session_state:
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("🔌 Configuration")
-    with st.expander("API Credentials", expanded=True):
+    st.header("📊 Dashboard Config")
+    st.markdown("---")
+    
+    with st.expander("🔐 API Credentials", expanded=True):
         cf_token = st.text_input("ClearFeed API Token", type="password")
         ai_key = st.text_input("Gemini API Key", type="password")
         
-    if st.button("🔗 Connect & Verify"):
+    if st.button("Link Account"):
         if not cf_token or not ai_key:
-            st.warning("Please provide both API keys.")
+            st.warning("⚠️ Please provide both API keys.")
         else:
-            with st.spinner("Verifying connection..."):
+            with st.spinner("Validating Credentials..."):
+                # 1. TEST CLEARFEED TOKEN
                 colls = clearfeed_api.get_collections(cf_token)
+                if not colls:
+                    st.error("❌ Invalid ClearFeed Token. Could not fetch collections.")
+                    st.stop()
+                
+                # 2. TEST GEMINI KEY
+                ai_valid = False
                 try:
                     import google.generativeai as genai
                     genai.configure(api_key=ai_key)
                     m = genai.GenerativeModel("gemini-2.5-flash-lite")
-                    m.generate_content("Hi")
+                    m.generate_content("Test") 
                     ai_valid = True
-                except:
-                    ai_valid = False
+                except Exception as e:
+                    st.error(f"❌ Invalid Gemini Key. Error: {str(e)}")
+                    st.stop()
 
+                # 3. SUCCESS
                 if colls and ai_valid:
                     st.session_state.collections_list = colls
                     st.session_state.data_stage = "connected"
-                    st.success("✅ Systems Online")
+                    st.success("✅ Connected Successfully!")
                     time.sleep(1)
                     st.rerun()
-                else:
-                    st.error("❌ Connection Failed.")
 
 # --- MAIN UI ---
-st.title("🤖 ClearFeed Intelligent Analyzer")
-st.markdown("Industry-grade RAG & Clustering pipeline for support ticket analysis.")
+st.title("ClearFeed Intelligent Analyzer")
+st.markdown("AI-Powered Support Ticket Analytics")
 
 if st.session_state.data_stage == "init":
     st.info("👈 Please connect your API keys in the sidebar to begin.")
@@ -143,27 +153,32 @@ if st.session_state.data_stage == "analyzed" and st.session_state.final_df is no
     st.divider()
     st.subheader("📊 Analysis Results")
     
-    df = st.session_state.final_df
+    df = st.session_state.final_df.copy()
     
-    # SORTING: Sort by Date Descending
+    # Sort by Date Descending
     if "created_at" in df.columns:
         df["created_at"] = pd.to_datetime(df["created_at"])
         df.sort_values(by="created_at", ascending=False, inplace=True)
     
-    # Display Copy
+    # Create Display DataFrame
     display_df = df.copy()
+    
+    # 1. REMOVE ONLY METADATA (Keep request_id now)
+    cols_to_drop = ["cf_id", "cluster_reasoning", "author_email"] # <--- request_id removed from drop list
+    display_df = display_df.drop(columns=[c for c in cols_to_drop if c in display_df.columns], errors='ignore')
+
+    # 2. Format Date
     if "created_at" in display_df.columns:
         display_df["created_at"] = display_df["created_at"].apply(lambda x: x.strftime('%b %d, %Y') if pd.notnull(x) else "")
 
-    # METRICS (Updated to 4 columns)
+    # METRICS
     m1, m2, m3, m4 = st.columns(4)
-    
     how_to_cnt = len(df[df['intent'] == 'how_to']) if 'intent' in df.columns else 0
     prob_cnt = len(df[df['intent'] == 'problem_report']) if 'intent' in df.columns else 0
     req_cnt = len(df[df['intent'] == 'request']) if 'intent' in df.columns else 0
     
     m1.metric("Total Tickets", len(df))
-    m2.metric("How-To Questions", how_to_cnt)  # <-- Added
+    m2.metric("How-To Questions", how_to_cnt)
     m3.metric("Problem Reports", prob_cnt)
     m4.metric("Feature Requests", req_cnt)
     
@@ -173,27 +188,25 @@ if st.session_state.data_stage == "analyzed" and st.session_state.final_df is no
         use_container_width=True,
         hide_index=True,
         column_config={
-            "cf_id": st.column_config.TextColumn("Ticket ID", width="small"),
+            # --- SHOWING REQUEST ID ---
+            "request_id": st.column_config.TextColumn("Request ID", width="small"),
+            
             "intent": st.column_config.TextColumn("Intent", width="small"),
+            "explanation": st.column_config.TextColumn("AI Reasoning", width="medium"),
             "cluster_category": st.column_config.TextColumn("Sub-Topic", width="medium"),
             "text": st.column_config.TextColumn("Conversation Transcript", width="large"),
             "channel": st.column_config.TextColumn("Channel", width="medium"),
+            "source": st.column_config.TextColumn("Source", width="small"),
             "author_name": st.column_config.TextColumn("Author", width="medium"),
             "url": st.column_config.LinkColumn("Link", display_text="Open"),
             "state": st.column_config.TextColumn("Status", width="small"),
             "created_at": st.column_config.TextColumn("Date", width="small"),
-            
-            # Hidden
-            "request_id": None,
-            "cluster_reasoning": None,
-            "source": None,
-            "author_email": None
         }
     )
     
-    excel_data = helpers.convert_df_to_excel(display_df)
+    excel_data = helpers.convert_df_to_excel(df)
     st.download_button(
-        label="📥 Download Report (.xlsx)",
+        label="📥 Download Full Report (.xlsx)",
         data=excel_data,
         file_name=f"clearfeed_analysis_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

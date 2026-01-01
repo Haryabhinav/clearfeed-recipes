@@ -1,58 +1,57 @@
-import io
-import pandas as pd
 import streamlit as st
-from datetime import datetime
-
-def convert_df_to_excel(df):
-    """
-    Converts a Pandas DataFrame into a binary Excel file object 
-    that Streamlit can download.
-    """
-    output = io.BytesIO()
-    # Use 'xlsxwriter' or 'openpyxl' engine
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Analysis_Results')
-        
-        # Auto-adjust column widths (Optional polish)
-        worksheet = writer.sheets['Analysis_Results']
-        for idx, col in enumerate(df.columns):
-            # precise width calculation or default to 20
-            max_len = max(
-                df[col].astype(str).map(len).max(),
-                len(str(col))
-            ) + 2
-            worksheet.column_dimensions[chr(65 + idx)].width = min(max_len, 50)
-            
-    processed_data = output.getvalue()
-    return processed_data
-
-def format_iso_date(iso_str):
-    """
-    Converts raw ISO dates (e.g., '2023-11-12T14:30:00Z') 
-    into a friendly readable format (e.g., 'Nov 12, 2023').
-    """
-    if not iso_str:
-        return ""
-    try:
-        # Handle 'Z' or standard ISO format
-        dt = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
-        return dt.strftime('%b %d, %Y')
-    except:
-        return iso_str
+import pandas as pd
+from io import BytesIO
 
 def apply_custom_style():
     """
-    Injects custom CSS to hide default Streamlit branding 
-    and maximize screen real estate.
+    Applies minimal styling to layout and padding, 
+    but lets standard Streamlit colors (Light/Dark mode) take over.
     """
     st.markdown("""
         <style>
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        .stDeployButton {display:none;}
+        /* Increase width of the main container for better table visibility */
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+            max-width: 95%;
+        }
         
-        /* Make the dataframe header stand out */
-        thead tr th:first-child {display:none}
-        tbody th {display:none}
+        /* Minimal adjustment to make metric cards look neat */
+        div[data-testid="stMetric"] {
+            border: 1px solid #e6e6e6;
+            padding: 10px;
+            border-radius: 5px;
+        }
         </style>
-        """, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
+
+def convert_df_to_excel(df):
+    """
+    Converts DataFrame to Excel for download.
+    Fixes 'timezone' error by removing timezone info from datetime columns.
+    """
+    output = BytesIO()
+    
+    # --- FIX: Create a copy to avoid modifying the displayed dataframe ---
+    export_df = df.copy()
+    
+    # Iterate through columns to find datetimes and strip timezone
+    for col in export_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(export_df[col]):
+            # Start by coercing to datetime just in case it's mixed
+            export_df[col] = pd.to_datetime(export_df[col], errors='coerce')
+            # Remove timezone if it exists
+            if export_df[col].dt.tz is not None:
+                export_df[col] = export_df[col].dt.tz_localize(None)
+
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        export_df.to_excel(writer, index=False, sheet_name='Sheet1')
+        workbook = writer.book
+        worksheet = writer.sheets['Sheet1']
+        
+        # Add basic formatting
+        format1 = workbook.add_format({'num_format': '0.00'}) 
+        worksheet.set_column('A:A', None, format1)
+        
+    processed_data = output.getvalue()
+    return processed_data
