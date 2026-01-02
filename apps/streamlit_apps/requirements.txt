@@ -1,10 +1,9 @@
 streamlit
-requests
 pandas
-beautifulsoup4
-python-dotenv
-google-generativeai
-scikit-learn
-numpy
-openpyxl
+requests
 plotly
+google-generativeai
+openai
+scikit-learn
+xlsxwriter
+beautifulsoup4

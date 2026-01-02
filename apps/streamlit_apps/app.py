@@ -7,7 +7,7 @@ import time
 from services import clearfeed_api, data_processor, ai_engine
 from utils import helpers
 
-# --- PAGE CONFIG ---
+# --- PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="ClearFeed Insights",
     page_icon="📊", 
@@ -15,7 +15,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Apply the Theme
 helpers.apply_custom_style()
 
 # --- STATE ---
@@ -27,6 +26,8 @@ if "final_df" not in st.session_state:
     st.session_state.final_df = None
 if "collections_list" not in st.session_state:
     st.session_state.collections_list = []
+if "ai_provider" not in st.session_state:
+    st.session_state.ai_provider = "Gemini"
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -35,34 +36,43 @@ with st.sidebar:
     
     with st.expander("🔐 API Credentials", expanded=True):
         cf_token = st.text_input("ClearFeed API Token", type="password")
-        ai_key = st.text_input("Gemini API Key", type="password")
+        ai_provider = st.selectbox("Select AI Provider", ["Gemini", "OpenAI"])
+        
+        if ai_provider == "Gemini":
+            ai_key = st.text_input("Google Gemini API Key", type="password")
+            st.caption("Using model: gemini-2.5-flash")
+        else:
+            ai_key = st.text_input("OpenAI API Key", type="password")
+            st.caption("Using model: gpt-4o")
         
     if st.button("Link Account"):
         if not cf_token or not ai_key:
             st.warning("⚠️ Please provide both API keys.")
         else:
-            with st.spinner("Validating Credentials..."):
-                # 1. TEST CLEARFEED TOKEN
+            with st.spinner(f"Validating {ai_provider} Credentials..."):
                 colls = clearfeed_api.get_collections(cf_token)
                 if not colls:
-                    st.error("❌ Invalid ClearFeed Token. Could not fetch collections.")
+                    st.error("❌ Invalid ClearFeed Token.")
                     st.stop()
                 
-                # 2. TEST GEMINI KEY
                 ai_valid = False
                 try:
-                    import google.generativeai as genai
-                    genai.configure(api_key=ai_key)
-                    m = genai.GenerativeModel("gemini-2.5-flash-lite")
-                    m.generate_content("Test") 
+                    if ai_provider == "Gemini":
+                        import google.generativeai as genai
+                        genai.configure(api_key=ai_key)
+                        genai.GenerativeModel("gemini-2.5-flash").generate_content("Test")
+                    else:
+                        import openai
+                        client = openai.OpenAI(api_key=ai_key)
+                        client.models.list()
                     ai_valid = True
                 except Exception as e:
-                    st.error(f"❌ Invalid Gemini Key. Error: {str(e)}")
+                    st.error(f"❌ Invalid {ai_provider} Key. Error: {str(e)}")
                     st.stop()
 
-                # 3. SUCCESS
                 if colls and ai_valid:
                     st.session_state.collections_list = colls
+                    st.session_state.ai_provider = ai_provider
                     st.session_state.data_stage = "connected"
                     st.success("✅ Connected Successfully!")
                     time.sleep(1)
@@ -88,18 +98,20 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
         selected_names = st.multiselect("Select Collections", options=list(options.keys()), default=list(options.keys()))
     
     with st.expander("⚙️ Advanced Cluster Settings"):
+        st.caption("Set number of sub-topics for each category")
         c1, c2, c3 = st.columns(3)
-        n_howto = c1.number_input("How-To Clusters", value=5, min_value=2)
-        n_problem = c2.number_input("Problem Clusters", value=5, min_value=2)
-        n_request = c3.number_input("Request Clusters", value=5, min_value=2)
+        n_feat = c1.number_input("Features", value=5, min_value=2)
+        n_prob = c2.number_input("Problems", value=5, min_value=2)
+        n_howto = c3.number_input("How-To", value=5, min_value=2)
 
     if st.button("🚀 Run Analysis Pipeline", type="primary"):
         if not selected_names:
             st.error("Please select at least one collection.")
         else:
             status = st.status("Processing Data...", expanded=True)
-            
-            # 1. Extraction
+            current_provider = st.session_state.get("ai_provider", "Gemini")
+
+            # 1. Fetch
             status.write("📥 Fetching tickets from ClearFeed...")
             raw_bucket = []
             start_date = date_range[0] if isinstance(date_range, tuple) else date_range
@@ -115,29 +127,29 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                 st.error("No tickets found in this date range.")
                 st.stop()
                 
-            # 2. Cleaning
+            # 2. Clean
             status.write("🧹 Cleaning Transcripts & preprocessing...")
             cleaned_data = data_processor.process_raw_data(raw_bucket)
             
-            # 3. Routing
-            status.write("🚦 Routing Intents (Gemini)...")
-            buckets = ai_engine.run_routing(cleaned_data, ai_key)
+            # 3. Route
+            status.write(f"🚦 Routing Intents ({current_provider})...")
+            buckets = ai_engine.run_routing(cleaned_data, ai_key, provider=current_provider)
             
-            # 4. Clustering
-            status.write("🧠 Clustering & Labeling Sub-topics...")
+            # 4. Cluster
+            status.write(f"🧠 Clustering Sub-topics ({current_provider})...")
             final_data = []
             
-            if buckets['how_to']:
-                res = ai_engine.cluster_and_label_intent("how_to", buckets['how_to'], n_howto, ai_key)
-                final_data.extend(res)
-            
-            if buckets['problem_report']:
-                res = ai_engine.cluster_and_label_intent("problem_report", buckets['problem_report'], n_problem, ai_key)
-                final_data.extend(res)
+            # Process 3 Core Categories with CORRECT KEYS
+            categories = [
+                ("feature_request", buckets['feature_request'], n_feat),
+                ("problem_report", buckets['problem_report'], n_prob),
+                ("how_to_question", buckets['how_to_question'], n_howto)
+            ]
 
-            if buckets['request']:
-                res = ai_engine.cluster_and_label_intent("request", buckets['request'], n_request, ai_key)
-                final_data.extend(res)
+            for name, data, n_clusters in categories:
+                if data:
+                    res = ai_engine.cluster_and_label_intent(name, data, n_clusters, ai_key, provider=current_provider)
+                    final_data.extend(res)
                 
             if final_data:
                 st.session_state.final_df = pd.DataFrame(final_data)
@@ -155,45 +167,38 @@ if st.session_state.data_stage == "analyzed" and st.session_state.final_df is no
     
     df = st.session_state.final_df.copy()
     
-    # Sort by Date Descending
     if "created_at" in df.columns:
         df["created_at"] = pd.to_datetime(df["created_at"])
         df.sort_values(by="created_at", ascending=False, inplace=True)
     
-    # Create Display DataFrame
     display_df = df.copy()
-    
-    # 1. REMOVE ONLY METADATA (Keep request_id now)
-    cols_to_drop = ["cf_id", "cluster_reasoning", "author_email"] # <--- request_id removed from drop list
+    cols_to_drop = ["cluster_reasoning", "author_email"] 
     display_df = display_df.drop(columns=[c for c in cols_to_drop if c in display_df.columns], errors='ignore')
 
-    # 2. Format Date
     if "created_at" in display_df.columns:
         display_df["created_at"] = display_df["created_at"].apply(lambda x: x.strftime('%b %d, %Y') if pd.notnull(x) else "")
 
-    # METRICS
+    # METRICS (3 COLUMNS)
     m1, m2, m3, m4 = st.columns(4)
-    how_to_cnt = len(df[df['intent'] == 'how_to']) if 'intent' in df.columns else 0
-    prob_cnt = len(df[df['intent'] == 'problem_report']) if 'intent' in df.columns else 0
-    req_cnt = len(df[df['intent'] == 'request']) if 'intent' in df.columns else 0
+    
+    feat_c = len(df[df['intent'] == 'feature_request'])
+    prob_c = len(df[df['intent'] == 'problem_report'])
+    how_c = len(df[df['intent'] == 'how_to_question'])
     
     m1.metric("Total Tickets", len(df))
-    m2.metric("How-To Questions", how_to_cnt)
-    m3.metric("Problem Reports", prob_cnt)
-    m4.metric("Feature Requests", req_cnt)
+    m2.metric("Feature Requests", feat_c)
+    m3.metric("Problem Reports", prob_c)
+    m4.metric("How-To Questions", how_c)
     
-    # Main Dataframe
     st.dataframe(
         display_df,
         use_container_width=True,
         hide_index=True,
         column_config={
-            # --- SHOWING REQUEST ID ---
-            "request_id": st.column_config.TextColumn("Request ID", width="small"),
-            
+            "request_id": st.column_config.TextColumn("System ID", width="small"),
             "intent": st.column_config.TextColumn("Intent", width="small"),
             "explanation": st.column_config.TextColumn("AI Reasoning", width="medium"),
-            "cluster_category": st.column_config.TextColumn("Sub-Topic", width="medium"),
+            "cluster_category": st.column_config.TextColumn("Sub-Topic", width="large"),
             "text": st.column_config.TextColumn("Conversation Transcript", width="large"),
             "channel": st.column_config.TextColumn("Channel", width="medium"),
             "source": st.column_config.TextColumn("Source", width="small"),

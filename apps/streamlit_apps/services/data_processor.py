@@ -37,33 +37,22 @@ def construct_transcript(request):
         if not text or len(text) < 2: continue
         
         # 'is_responder' is the reliable flag for Agent vs User
-        role = "Agent" if msg.get("is_responder") else "User"
+        role = "Responder" if msg.get("is_responder") else "User"
         transcript.append(f"{role}: {text}")
     
     full_text = "\n".join(transcript)
-    if len(full_text) < 5:
-        return clean_html(request.get("title", "No content provided"))
-    return full_text
+    if len(full_text) >= 10:
+        return full_text
 
-def format_cf_id(tickets, internal_id):
-    """
-    Extracts the friendly 'CF-123' key from the tickets array.
-    Falls back to 'CF-{internal_id}' if no external key exists.
-    """
-    # 1. Try to find the 'key' in the tickets array (Official Doc location)
-    if tickets and isinstance(tickets, list) and len(tickets) > 0:
-        key = tickets[0].get("key")
-        if key: return key
+    # If transcript failed, try the Description
+    description_fallback = clean_html(request.get("description", ""))
+    if len(description_fallback) >= 10:
+        return description_fallback
         
-        # If key is missing, check 'id' in ticket object
-        t_id = tickets[0].get("id")
-        if t_id: return f"CF-{t_id}"
+    # If both failed, return the Title (or the ultimate "No content" message)
+    return clean_html(request.get("title", "No content provided"))
 
-    # 2. Fallback to System ID
-    if internal_id:
-        return f"CF-{internal_id}"
-        
-    return "N/A"
+
 
 def determine_source(req):
     """
@@ -91,75 +80,61 @@ def process_raw_data(raw_data):
     
     for req in raw_data:
         text = construct_transcript(req)
+        
+        # --- 1. Identifier (Internal System ID Only) ---
         internal_id = str(req.get("id"))
         
-        # --- 1. CF-ID (Strict Schema Match) ---
-        final_cf_id = format_cf_id(req.get("tickets", []), internal_id)
-
         # --- 2. Channel ---
-        # Docs: request['channel']['name']
         channel_name = get_nested_value(req, "channel.name")
         if not channel_name:
-            channel_name = "N/A"
+            channel_name = "N/A (Direct/Email)"
 
         # --- 3. Source ---
         source_display = determine_source(req)
 
-        # --- 4. Author (Strict Schema Match) ---
-        # Docs: 'author' is an Object containing details. 'author_email' is a String.
+        # --- 4. Author Extraction ---
         author_email = req.get("author_email")
-        author_obj = req.get("author", {}) # Safely handle if None
+        author_obj = req.get("author", {}) 
         
-        # If author is just an ID string (rare but possible in old API versions)
         if isinstance(author_obj, str):
             author_id = author_obj
             author_name = None
         else:
             author_id = author_obj.get("id", "Unknown")
-            author_name = author_obj.get("name") # Explicit 'name' field in object
+            author_name = author_obj.get("name")
         
-        # Name Fallback Strategy
         if not author_name:
             if author_email:
                 author_name = author_email.split('@')[0]
             else:
-                # Deep Search in Messages (Last Resort)
                 messages = req.get("messages", [])
                 for msg in messages:
-                    # Check if message author matches ticket author
-                    m_auth = msg.get("author")
-                    # msg['author'] is usually a string ID
-                    if m_auth == author_id:
+                    if msg.get("author") == author_id:
                         found = msg.get("user_name") or get_nested_value(msg, "user_profile.real_name")
                         if found:
                             author_name = found
                             break
         
-        # Final cleanup if still unknown
         if not author_name:
             if str(author_id).startswith("U"):
-                 author_name = f"Slack User {author_id}"
+                author_name = f"Slack User {author_id}"
             else:
-                 author_name = f"User {author_id}"
+                author_name = f"User {author_id}"
 
         if not author_email:
             author_email = "No Email"
 
-        # --- 5. URL ---
-        # Docs: request['request_thread']['url']
-        url = get_nested_value(req, "request_thread.url")
-        # Fallback: request['tickets'][0]['url']
-        if not url:
-            tickets = req.get("tickets", [])
-            if tickets and len(tickets) > 0:
-                url = tickets[0].get("url")
-        # Fallback: Constructed URL
-        if not url:
+        # --- 5. Smart URL Logic ---
+        # If it's Slack and has a thread link, use it. Otherwise, use the ClearFeed Web App.
+        slack_url = get_nested_value(req, "request_thread.url")
+        
+        if source_display == "Slack" and slack_url:
+            url = slack_url
+        else:
             url = f"https://app.clearfeed.ai/requests/{internal_id}"
 
         cleaned.append({
-            "cf_id": final_cf_id,
-            "request_id": internal_id,
+            "request_id": internal_id, 
             "channel": channel_name,
             "source": source_display,
             "author_name": author_name,
