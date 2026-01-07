@@ -37,7 +37,7 @@ with st.sidebar:
             st.caption("Using model: gemini-2.5-flash-lite")
         else:
             ai_key = st.text_input("OpenAI API Key", type="password")
-            st.caption("Using model: gpt-4o")
+            st.caption("Using model: gpt-4.1")
         
     if st.button("Link Account"):
         if not cf_token or not ai_key:

@@ -15,7 +15,7 @@ def clean_json_response(text):
     return text.strip()
 
 # --- OPENAI SPECIFIC HELPERS ---
-def call_openai_json(api_key, prompt, model="gpt-4o-mini"):
+def call_openai_json(api_key, prompt, model="gpt-4.1"):
     client = openai.OpenAI(api_key=api_key)
     try:
         response = client.chat.completions.create(
@@ -104,7 +104,7 @@ def classify_batch(requests_batch, api_key, provider):
     """
     
     if provider == "OpenAI":
-        return json.loads(call_openai_json(api_key, prompt, model="gpt-4o-mini"))
+        return json.loads(call_openai_json(api_key, prompt, model="gpt-4.1"))
     else:
         genai.configure(api_key=api_key)
         # Use a stable model
