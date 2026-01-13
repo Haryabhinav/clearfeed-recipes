@@ -53,10 +53,10 @@ def construct_transcript(request):
     return clean_html(request.get("title", "No content provided"))
 
 
-
 def determine_source(req):
     """
     Infers source since 'source' isn't a top-level field in Request object.
+    Used for logic checks (like URL generation).
     """
     # 1. Check Channel Integration Type
     c_type = get_nested_value(req, "channel.integration_type")
@@ -75,7 +75,7 @@ def determine_source(req):
         
     return "ClearFeed"
 
-def process_raw_data(raw_data):
+def process_raw_data(raw_data, collection_name):
     cleaned = []
     
     for req in raw_data:
@@ -90,7 +90,11 @@ def process_raw_data(raw_data):
             channel_name = "N/A (Direct/Email)"
 
         # --- 3. Source ---
-        source_display = determine_source(req)
+        # UPDATED: Use the passed Collection Name for display
+        source_display = collection_name
+        
+        # Calculate actual integration type for logic (e.g. generating Slack URLs)
+        integration_type = determine_source(req)
 
         # --- 4. Author Extraction ---
         author_email = req.get("author_email")
@@ -128,7 +132,8 @@ def process_raw_data(raw_data):
         # If it's Slack and has a thread link, use it. Otherwise, use the ClearFeed Web App.
         slack_url = get_nested_value(req, "request_thread.url")
         
-        if source_display == "Slack" and slack_url:
+        # UPDATED: Check integration_type (e.g. "Slack") instead of source_display (which is now Collection Name)
+        if integration_type == "Slack" and slack_url:
             url = slack_url
         else:
             url = f"https://app.clearfeed.ai/requests/{internal_id}"

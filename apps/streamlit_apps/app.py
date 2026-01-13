@@ -104,28 +104,29 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
             current_provider = st.session_state.get("ai_provider", "Gemini")
 
             try:
-                # --- Step 1: Fetch ---
-                status.write("📥 Initializing Fetcher...")
+                # --- Step 1 & 2: Fetch & Clean (COMBINED) ---
+                status.write("📥 Fetching and Cleaning tickets...")
                 
                 start_date = date_range[0]
                 end_date = date_range[1] if len(date_range) > 1 else datetime.now().date()
-                
                 start_date_iso = start_date.isoformat()
                 end_date_iso = end_date.isoformat() 
                 
-                raw_bucket = []
+                cleaned_data = [] # Stores processed data with Source = Collection Name
                 
-                # --- LIVE PROGRESS LOGIC ---
+                # Live Progress logic
                 progress_text = status.empty() 
                 progress_state = {"count": 0}
                 
                 def update_ui_progress(new_count):
                     progress_state["count"] += new_count
                     current = progress_state["count"]
-                    progress_text.markdown(f"**📥 Fetching tickets... (Currently: {current} tickets)**")
+                    progress_text.markdown(f"**📥 Processing... (Currently: {current} tickets)**")
 
                 for name in selected_names:
                     cid = options[name]
+                    
+                    # 1. Fetch
                     tickets = clearfeed_api.fetch_requests_for_collection(
                         cf_token, 
                         cid, 
@@ -134,27 +135,33 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                         progress_callback=update_ui_progress
                     )
                     
-                    # Manual filter backup
+                    # 2. Filter by date (Manual backup)
+                    valid_tickets = []
                     for t in tickets:
                         c_raw = t.get("created_at")
                         if c_raw:
                             try:
                                 if isinstance(c_raw, str): t_d = datetime.strptime(c_raw[:10], "%Y-%m-%d").date()
                                 else: t_d = datetime.fromtimestamp(c_raw / 1000).date()
-                                if start_date <= t_d <= end_date: raw_bucket.append(t)
-                            except: raw_bucket.append(t)
+                                if start_date <= t_d <= end_date: 
+                                    valid_tickets.append(t)
+                            except: 
+                                valid_tickets.append(t)
+                        else:
+                            valid_tickets.append(t)
+
+                    # 3. Clean & Pass Collection Name (THE FIX)
+                    if valid_tickets:
+                        batch_clean = data_processor.process_raw_data(valid_tickets, collection_name=name)
+                        cleaned_data.extend(batch_clean)
                 
-                status.write(f"✅ Download Complete: {len(raw_bucket)} valid tickets found.")
+                status.write(f"✅ Processing Complete: {len(cleaned_data)} tickets prepared.")
                 
-                if not raw_bucket:
+                if not cleaned_data:
                     status.update(label="No Data Found", state="error")
                     st.error("No tickets found.")
                     st.stop()
                     
-                # --- Step 2: Cleaning ---
-                status.write("🧹 Cleaning Transcripts...")
-                cleaned_data = data_processor.process_raw_data(raw_bucket)
-                
                 # --- Step 3: Routing ---
                 status.write(f"🚦 Routing Intents ({current_provider})...")
                 buckets = ai_engine.run_routing(cleaned_data, ai_key, provider=current_provider)
@@ -163,7 +170,6 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                 status.write(f"🧠 Clustering Sub-topics ({current_provider})...")
                 final_data = []
                 
-                # IMPORTANT: Include 'unclassified' in the clustering loop to prevent data loss
                 cats = [
                     ("feature_request", buckets.get('feature_request', []), n_feat),
                     ("problem_report", buckets.get('problem_report', []), n_prob),
@@ -172,14 +178,13 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                 
                 for name, data, n in cats:
                     if data:
-                        # Cluster if we have enough data, otherwise just add
                         if len(data) > 5:
                             res = ai_engine.cluster_and_label_intent(name, data, n, ai_key, provider=current_provider)
                             final_data.extend(res)
                         else:
                              for item in data:
-                                item['cluster_category'] = f"General {name.replace('_', ' ').title()}"
-                                item['cluster_reasoning'] = "Too few items to cluster"
+                                 item['cluster_category'] = f"General {name.replace('_', ' ').title()}"
+                                 item['cluster_reasoning'] = "Too few items to cluster"
                              final_data.extend(data)
                 
                 # Success
@@ -221,13 +226,12 @@ if st.session_state.data_stage == "analyzed" and st.session_state.final_df is no
     m3.metric("Problem Reports", len(df[df['intent'] == 'problem_report']))
     m4.metric("How-To Questions", len(df[df['intent'] == 'how_to_question']))
     
-    # 2. Detailed Cluster Breakdown (Simplified view)
+    # 2. Detailed Cluster Breakdown
     st.divider()
     st.markdown("### 🧩 Deep Dive: Top Themes")
     
     c1, c2, c3 = st.columns(3)
     
-    # Definition of the columns and their corresponding intents
     breakdown_cols = [
         ("✨ Feature Requests", "feature_request", c1),
         ("🐞 Problem Reports", "problem_report", c2),
@@ -240,11 +244,9 @@ if st.session_state.data_stage == "analyzed" and st.session_state.final_df is no
             subset = df[df['intent'] == intent_key]
             
             if not subset.empty:
-                # Count cluster occurrences
                 counts = subset['cluster_category'].value_counts().reset_index()
                 counts.columns = ['Topic', 'Count']
                 
-                # Display simply as numbers (No progress bars)
                 st.dataframe(
                     counts,
                     use_container_width=True,

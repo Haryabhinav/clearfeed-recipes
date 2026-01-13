@@ -1,3 +1,5 @@
+# File: services/ai_engine.py
+
 import json
 import time
 import re
@@ -8,6 +10,11 @@ from google.api_core import exceptions as google_exceptions
 import openai
 import streamlit as st
 
+# --- CONFIG ---
+# Gemini Free Tier Limit: 15 RPM = 1 request every 4 seconds.
+# We set a safe delay to avoid "429 Resource Exhausted" errors.
+GEMINI_SAFE_DELAY = 4.0 
+
 # --- HELPER: CLEAN AI JSON ---
 def clean_json_response(text):
     text = re.sub(r"```json", "", text, flags=re.IGNORECASE)
@@ -15,7 +22,7 @@ def clean_json_response(text):
     return text.strip()
 
 # --- OPENAI SPECIFIC HELPERS ---
-def call_openai_json(api_key, prompt, model="gpt-4.1"):
+def call_openai_json(api_key, prompt, model="gpt-4o"):
     client = openai.OpenAI(api_key=api_key)
     try:
         response = client.chat.completions.create(
@@ -29,37 +36,55 @@ def call_openai_json(api_key, prompt, model="gpt-4.1"):
         return response.choices[0].message.content
 
     except openai.RateLimitError:
-        raise Exception("🚨 OpenAI Quota Exceeded! Execution stopped. Check billing.")
-    except openai.AuthenticationError:
-        raise Exception("🚨 Invalid OpenAI API Key.")
-    except Exception:
+        st.warning("⚠️ OpenAI Rate Limit Hit. Sleeping for 20s...")
+        time.sleep(20)
+        return "{}"
+    except Exception as e:
+        print(f"OpenAI Error: {e}")
         return "{}"
 
-# --- GEMINI EMBEDDINGS (With Retry) ---
+# --- GEMINI EMBEDDINGS (With Strict Rate Limiting) ---
+# --- GEMINI EMBEDDINGS (With Empty Content Fallback) ---
 def get_gemini_embeddings(texts, api_key):
     genai.configure(api_key=api_key)
     embeddings = []
     
-    # Process in small batches to avoid timeouts
+    # Process in small batches
     for i in range(0, len(texts), 20):
         batch = texts[i:i+20]
+        
+        # --- FALLBACK PROTECTION ---
+        # 1. Sanitize the batch: The API crashes if any single item is empty.
+        # 2. We preserve order by replacing empty text with a placeholder.
+        safe_batch = []
+        for t in batch:
+            # Truncate and strip whitespace
+            cleaned = t[:500].strip() 
+            if not cleaned:
+                safe_batch.append("empty_content") # Placeholder text
+            else:
+                safe_batch.append(cleaned)
+
         try:
-            # Using the embedding model specifically
             result = genai.embed_content(
                 model="models/text-embedding-004",
-                content=[t[:500] for t in batch], # Truncate for safety
+                content=safe_batch, 
                 task_type="clustering"
             )
             embeddings.extend(result['embedding'])
-            time.sleep(0.5) # Rate limit safety
+            
+            # Rate limit protection
+            time.sleep(2.0) 
 
         except Exception as e:
-            # If embedding fails, return empty to trigger fallback logic
-            print(f"Embedding failed: {e}")
-            return [], 0.0
+            print(f"Embedding batch failed: {e}")
+            # Fallback: If the API call still fails, insert Zero Vectors 
+            # so the list length matches the data length (Critical for K-Means)
+            # Gemini embedding-004 has 768 dimensions.
+            zero_vectors = [[0.0] * 768 for _ in range(len(batch))]
+            embeddings.extend(zero_vectors)
             
     return np.array(embeddings), 1.0
-
 # --- OPENAI EMBEDDINGS ---
 def get_openai_embeddings(texts, api_key):
     client = openai.OpenAI(api_key=api_key)
@@ -71,7 +96,6 @@ def get_openai_embeddings(texts, api_key):
             resp = client.embeddings.create(input=clean_batch, model="text-embedding-3-small")
             embeddings.extend([d.embedding for d in resp.data])
         except Exception:
-             # Fail fast
             return [], 0.0
     return np.array(embeddings), 1.0
 
@@ -79,20 +103,25 @@ def get_openai_embeddings(texts, api_key):
 def classify_batch(requests_batch, api_key, provider):
     batch_text = ""
     for req in requests_batch:
-        # Strict context limit (first 200 chars are usually enough for intent)
         clean_text = req['text'][:200].replace("\n", " ").replace('"', "'")
         batch_text += f"ID_{req['request_id']}: {clean_text}\n"
 
-    # 🟢 OPTIMIZED PROMPT: Asking for simple Key-Value pairs only
     prompt = f"""
     You are a Support Ticket Classifier.
     Task: Label each ticket with exactly ONE category.
     
-    Categories:
-    - feature_request
-    - problem_report
-    - how_to_question
+    ### DEFINITIONS (STRICTLY FOLLOW THESE):
     
+    1. **feature_request**: 
+       - The customer requests a new feature/enhancement AND the agent explicitly confirms it as a potential improvement.
+       - If Agent says it already exists, it is NOT a feature_request.
+       
+    3. **how_to_question**: 
+       - Customer asks for clarification or instruction on how to use a feature.
+       
+    4. **problem_report**: 
+        - Customer reports problems with features/services (broader than bug).
+        - If Agent confirms it's a bug, it is a problem_report.
     Input Data:
     {batch_text}
     
@@ -104,10 +133,9 @@ def classify_batch(requests_batch, api_key, provider):
     """
     
     if provider == "OpenAI":
-        return json.loads(call_openai_json(api_key, prompt, model="gpt-4.1"))
+        return json.loads(call_openai_json(api_key, prompt))
     else:
         genai.configure(api_key=api_key)
-        # Use a stable model
         model = genai.GenerativeModel("gemini-2.5-flash-lite") 
         try:
             response = model.generate_content(
@@ -124,19 +152,23 @@ def run_routing(cleaned_data, api_key, provider="Gemini"):
         "feature_request": [],
         "problem_report": [],
         "how_to_question": [],
-        "unclassified": [] # New bucket for failures
+        "unclassified": [] 
     }
     
-    batch_size = 50 # Smaller batch size for higher accuracy
+    # Use slightly larger batch size to reduce number of API calls
+    batch_size = 30 
     progress_bar = st.progress(0)
     total = len(cleaned_data)
     
-    # 🟢 FIXED: Restored missing 'for' loop and removed incorrect 'model=' line
     for i in range(0, total, batch_size):
         batch = cleaned_data[i : i + batch_size]
         if not batch: continue
         
         results_map = classify_batch(batch, api_key, provider)
+        
+        # --- RATE LIMIT PROTECTION ---
+        if provider == "Gemini":
+            time.sleep(GEMINI_SAFE_DELAY) # Sleep 4s to stay under 15 RPM
         
         # Normalize Keys (Handle ID_123 vs 123)
         normalized_results = {}
@@ -149,38 +181,31 @@ def run_routing(cleaned_data, api_key, provider="Gemini"):
             req_id_str = str(req['request_id'])
             res = normalized_results.get(req_id_str)
             
-            # Handle String vs Dict vs None
             raw_label = "unclassified"
             explanation = "AI could not classify"
             
             if isinstance(res, str):
-                # AI returned simple format: {"ID": "label"} -> CORRECT
                 raw_label = res
                 explanation = "AI Classified"
             elif isinstance(res, dict):
-                # AI returned complex format: {"ID": {"label": "..."}}
                 raw_label = res.get("label", "unclassified")
                 explanation = res.get("explanation", "AI Classified")
             
-            # Normalize label
             raw_label = raw_label.lower().strip()
             if "feature" in raw_label: raw_label = "feature_request"
             elif "problem" in raw_label or "bug" in raw_label: raw_label = "problem_report"
             elif "how" in raw_label or "question" in raw_label: raw_label = "how_to_question"
             
-            # Assign to bucket
             if raw_label in buckets:
                 req['intent'] = raw_label
                 req['explanation'] = explanation
                 buckets[raw_label].append(req)
             else:
-                # If AI returned garbage, put in unclassified (don't fake it as problem_report)
                 req['intent'] = "unclassified"
                 req['explanation'] = f"Raw AI output: {raw_label}"
                 buckets["unclassified"].append(req)
             
         progress_bar.progress(min((i + batch_size) / total, 1.0))
-        time.sleep(0.5) 
         
     return buckets
 
@@ -200,7 +225,6 @@ def cluster_and_label_intent(intent_name, data_list, num_clusters, api_key, prov
     else:
         embeddings, success = get_gemini_embeddings(texts, api_key)
     
-    # If embeddings fail, fallback to a "General" group
     if success < 0.5 or len(embeddings) == 0:
         for item in data_list:
             item['cluster_category'] = "Unclustered"
@@ -211,11 +235,10 @@ def cluster_and_label_intent(intent_name, data_list, num_clusters, api_key, prov
     kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10).fit(embeddings)
     labels = kmeans.labels_
     
-    # 3. Smart Labeling (Sample Representative Tickets)
+    # 3. Smart Labeling
     samples_map = {}
     for i in range(num_clusters):
         indices = np.where(labels == i)[0]
-        # Get up to 5 examples
         sample_idxs = np.random.choice(indices, min(len(indices), 5), replace=False)
         samples_map[f"{i}"] = [texts[idx][:200] for idx in sample_idxs]
         
@@ -238,8 +261,11 @@ def cluster_and_label_intent(intent_name, data_list, num_clusters, api_key, prov
             response_text = call_openai_json(api_key, prompt)
         else:
             genai.configure(api_key=api_key)
-            # 🟢 FIXED: Correct indentation and using stable model
             model = genai.GenerativeModel("gemini-2.5-flash-lite")
+            
+            # RATE LIMIT PROTECTION
+            time.sleep(GEMINI_SAFE_DELAY) 
+            
             resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
             response_text = clean_json_response(resp.text)
             
@@ -249,7 +275,6 @@ def cluster_and_label_intent(intent_name, data_list, num_clusters, api_key, prov
         labels_map = {}
 
     # 4. Apply Labels
-    # Normalize keys
     normalized_labels = {}
     if isinstance(labels_map, dict):
         for k, v in labels_map.items():
