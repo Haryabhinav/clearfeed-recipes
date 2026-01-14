@@ -34,7 +34,7 @@ def construct_transcript(request):
     
     for msg in messages[:15]: # Expanded context to 15 messages
         text = clean_html(msg.get("text", ""))
-        if not text or len(text) < 2: continue
+        if not text or len(text) < 10: continue
         
         # 'is_responder' is the reliable flag for Agent vs User
         role = "Responder" if msg.get("is_responder") else "User"

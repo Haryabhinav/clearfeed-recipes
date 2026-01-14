@@ -34,7 +34,7 @@ with st.sidebar:
         ai_provider = st.selectbox("Select AI Provider", ["Gemini", "OpenAI"])
         if ai_provider == "Gemini":
             ai_key = st.text_input("Google Gemini API Key", type="password")
-            st.caption("Using model: gemini-2.5-flash-lite")
+            st.caption("Using model: gemini-2.5-flash")
         else:
             ai_key = st.text_input("OpenAI API Key", type="password")
             st.caption("Using model: gpt-4.1")
@@ -55,7 +55,7 @@ with st.sidebar:
                         if ai_provider == "Gemini":
                             import google.generativeai as genai
                             genai.configure(api_key=ai_key)
-                            genai.GenerativeModel("gemini-2.5-flash-lite").generate_content("Test")
+                            genai.GenerativeModel("gemini-2.5-flash").generate_content("Test")
                         else:
                             import openai
                             client = openai.OpenAI(api_key=ai_key)

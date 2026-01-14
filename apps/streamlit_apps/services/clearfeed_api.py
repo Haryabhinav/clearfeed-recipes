@@ -126,7 +126,7 @@ def fetch_requests_for_collection(api_token, collection_id, start_date, end_date
         return local_tickets
 
     # Parallel Execution
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         for state in states:
             future = executor.submit(fetch_state_data, state)
