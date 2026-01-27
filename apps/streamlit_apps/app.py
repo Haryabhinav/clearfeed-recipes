@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 import time
+import re
 from io import BytesIO
 
 # --- IMPORTS ---
-from services import clearfeed_api, data_processor, ai_engine
+from services import clearfeed_api, data_processor, ai_engine, prompt_generator
 from utils import helpers
 
 # --- PAGE CONFIGURATION ---
@@ -22,6 +23,8 @@ helpers.apply_custom_style()
 if "data_stage" not in st.session_state: st.session_state.data_stage = "init"
 if "raw_data" not in st.session_state: st.session_state.raw_data = []
 if "final_df" not in st.session_state: st.session_state.final_df = None
+if "generated_definitions" not in st.session_state: st.session_state.generated_definitions = ""
+if "validation_df" not in st.session_state: st.session_state.validation_df = None
 if "collections_list" not in st.session_state: st.session_state.collections_list = []
 if "ai_provider" not in st.session_state: st.session_state.ai_provider = "Gemini"
 
@@ -89,12 +92,6 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
     with col2:
         options = {c['name']: c['id'] for c in st.session_state.collections_list}
         selected_names = st.multiselect("Select Collections", options=list(options.keys()), default=list(options.keys()))
-    
-    with st.expander("⚙️ Specify the number of sub-topics to extract per intent type", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        n_feat = c1.number_input("Features Requests", value=5, min_value=2)
-        n_prob = c2.number_input("Problems Reports", value=5, min_value=2)
-        n_howto = c3.number_input("General Enquiry ( e.g. How to do something )", value=5, min_value=2)
 
     if st.button("🚀 Run Analysis Pipeline", type="primary"):
         if not selected_names:
@@ -104,7 +101,7 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
             current_provider = st.session_state.get("ai_provider", "Gemini")
 
             try:
-                # --- Step 1 & 2: Fetch & Clean (COMBINED) ---
+                # --- Step 1 & 2: Fetch & Clean ---
                 status.write("📥 Fetching and Cleaning tickets...")
                 
                 start_date = date_range[0]
@@ -112,9 +109,8 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                 start_date_iso = start_date.isoformat()
                 end_date_iso = end_date.isoformat() 
                 
-                cleaned_data = [] # Stores processed data with Source = Collection Name
+                cleaned_data = [] 
                 
-                # Live Progress logic
                 progress_text = status.empty() 
                 progress_state = {"count": 0}
                 
@@ -125,17 +121,10 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
 
                 for name in selected_names:
                     cid = options[name]
-                    
-                    # 1. Fetch
                     tickets = clearfeed_api.fetch_requests_for_collection(
-                        cf_token, 
-                        cid, 
-                        start_date_iso, 
-                        end_date_iso,  
-                        progress_callback=update_ui_progress
+                        cf_token, cid, start_date_iso, end_date_iso, progress_callback=update_ui_progress
                     )
                     
-                    # 2. Filter by date (Manual backup)
                     valid_tickets = []
                     for t in tickets:
                         c_raw = t.get("created_at")
@@ -145,12 +134,9 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                                 else: t_d = datetime.fromtimestamp(c_raw / 1000).date()
                                 if start_date <= t_d <= end_date: 
                                     valid_tickets.append(t)
-                            except: 
-                                valid_tickets.append(t)
-                        else:
-                            valid_tickets.append(t)
+                            except: valid_tickets.append(t)
+                        else: valid_tickets.append(t)
 
-                    # 3. Clean & Pass Collection Name (THE FIX)
                     if valid_tickets:
                         batch_clean = data_processor.process_raw_data(valid_tickets, collection_name=name)
                         cleaned_data.extend(batch_clean)
@@ -170,6 +156,9 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                 status.write(f"🧠 Clustering Sub-topics ({current_provider})...")
                 final_data = []
                 
+                # We hardcode 0 to enforce Auto-Discovery via Silhouette Score
+                n_feat, n_prob, n_howto = 0, 0, 0
+                
                 cats = [
                     ("feature_request", buckets.get('feature_request', []), n_feat),
                     ("problem_report", buckets.get('problem_report', []), n_prob),
@@ -179,6 +168,7 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                 for name, data, n in cats:
                     if data:
                         if len(data) > 5:
+                            # 0 triggers auto-detection in ai_engine
                             res = ai_engine.cluster_and_label_intent(name, data, n, ai_key, provider=current_provider)
                             final_data.extend(res)
                         else:
@@ -187,9 +177,40 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                                  item['cluster_reasoning'] = "Too few items to cluster"
                              final_data.extend(data)
                 
-                # Success
+                # --- Step 5: Post-Processing & Prompt Generation ---
                 if final_data:
-                    st.session_state.final_df = pd.DataFrame(final_data)
+                    df_temp = pd.DataFrame(final_data)
+                    
+                    # --- PRODUCTION SLUGS ---
+                    # 1. category_slug
+                    df_temp['category_slug'] = df_temp['intent']
+                    
+                    # 2. sub_category_slug
+                    def make_slug(text):
+                        if not isinstance(text, str): return ""
+                        slug = text.lower().strip()
+                        slug = re.sub(r'[\s\-]+', '_', slug)
+                        slug = re.sub(r'[^\w_]', '', slug)
+                        return slug
+
+                    df_temp['sub_category_slug'] = df_temp['cluster_category'].apply(make_slug)
+                    
+                    st.session_state.final_df = df_temp
+                    
+                    # 5A. Generate Definitions
+                    status.write("📝 Auto-generating Prompt Definitions...")
+                    definitions_md = prompt_generator.generate_classification_prompt(
+                        df_temp, ai_key, provider=current_provider
+                    )
+                    st.session_state.generated_definitions = definitions_md
+
+                    # 5B. Run Validation
+                    status.write("🧪 Validating on 20 random tickets...")
+                    val_df = prompt_generator.validate_prompt(
+                        df_temp, definitions_md, ai_key, provider=current_provider
+                    )
+                    st.session_state.validation_df = val_df
+                    
                     st.session_state.data_stage = "analyzed"
                     status.update(label="Pipeline Complete!", state="complete", expanded=False)
                     st.rerun()
@@ -242,22 +263,49 @@ if st.session_state.data_stage == "analyzed" and st.session_state.final_df is no
         with col:
             st.info(f"**{title}**")
             subset = df[df['intent'] == intent_key]
-            
             if not subset.empty:
                 counts = subset['cluster_category'].value_counts().reset_index()
                 counts.columns = ['Topic', 'Count']
-                
-                st.dataframe(
-                    counts,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Topic": st.column_config.TextColumn("Topic"),
-                        "Count": st.column_config.NumberColumn("Count", format="%d"),
-                    }
-                )
+                st.dataframe(counts, use_container_width=True, hide_index=True)
             else:
-                st.caption("No tickets found for this category.")
+                st.caption("No tickets found.")
+    
+    # --- VALIDATION & PROMPTS SECTION ---
+    st.divider()
+    st.markdown("### 🧪 Validation & Inference Prompt")
+    
+    tab1, tab2 = st.tabs(["Production Prompt", "Accuracy Check (20 Samples)"])
+    
+    with tab1:
+        st.success("✅ **Production-Ready Inference Prompt**")
+        st.caption("Copy this entire prompt into your AI agent (ChatGPT, Zapier, LangChain) to classify new tickets automatically.")
+        
+        final_prompt_display = prompt_generator.build_inference_system_prompt(st.session_state.generated_definitions)
+        st.text_area("Master Inference Prompt", value=final_prompt_display, height=400)
+        
+        st.download_button(
+            label="📥 Download Prompt (.txt)",
+            data=final_prompt_display,
+            file_name="clearfeed_inference_prompt.txt",
+            mime="text/plain"
+        )
+
+    with tab2:
+        st.info("We tested the generated prompt above on 20 random tickets from your dataset. Here are the results:")
+        if st.session_state.validation_df is not None:
+            val_view = st.session_state.validation_df.copy()
+            st.dataframe(
+                val_view[['text', 'pred_category', 'pred_sub_category']], 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    "text": st.column_config.TextColumn("Ticket Text", width="large"),
+                    "pred_category": st.column_config.TextColumn("AI Category", width="medium"),
+                    "pred_sub_category": st.column_config.TextColumn("AI Sub-topic", width="medium"),
+                }
+            )
+        else:
+            st.warning("Validation data missing.")
 
     # 3. Full Data Table
     st.divider()
@@ -267,8 +315,10 @@ if st.session_state.data_stage == "analyzed" and st.session_state.final_df is no
         use_container_width=True, hide_index=True,
         column_config={
             "url": st.column_config.LinkColumn("Link", display_text="Open"),
+            "category_slug": st.column_config.TextColumn("Category Slug", help="Machine-readable category"),
+            "sub_category_slug": st.column_config.TextColumn("Sub-Category Slug", help="Machine-readable sub-topic"),
         }
     )
     
     excel_data = helpers.convert_df_to_excel(df)
-    st.download_button("📥 Download Report", excel_data, "report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("📥 Download Report (Excel)", excel_data, "report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
