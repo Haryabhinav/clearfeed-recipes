@@ -5,11 +5,10 @@ import time
 import re
 from io import BytesIO
 
-# --- IMPORTS ---
-from services import clearfeed_api, data_processor, ai_engine, prompt_generator
+# --- UPDATED IMPORTS TO MATCH FILE STRUCTURE ---
+from services import clearfeed_api, data_processor, intent_router, clustering_engine, prompt_generator
 from utils import helpers
 
-# --- PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="ClearFeed Insights",
     page_icon="📊", 
@@ -19,7 +18,7 @@ st.set_page_config(
 
 helpers.apply_custom_style()
 
-# --- STATE MANAGEMENT ---
+# Session State Initialization
 if "data_stage" not in st.session_state: st.session_state.data_stage = "init"
 if "raw_data" not in st.session_state: st.session_state.raw_data = []
 if "final_df" not in st.session_state: st.session_state.final_df = None
@@ -28,7 +27,6 @@ if "validation_df" not in st.session_state: st.session_state.validation_df = Non
 if "collections_list" not in st.session_state: st.session_state.collections_list = []
 if "ai_provider" not in st.session_state: st.session_state.ai_provider = "Gemini"
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.header("📊 Dashboard Config")
     st.markdown("---")
@@ -76,7 +74,6 @@ with st.sidebar:
                 time.sleep(1)
                 st.rerun()
 
-# --- MAIN UI ---
 st.title("ClearFeed Intelligent Analyzer")
 st.markdown("AI-Powered Support Ticket Analytics")
 
@@ -101,23 +98,20 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
             current_provider = st.session_state.get("ai_provider", "Gemini")
 
             try:
-                # --- Step 1 & 2: Fetch & Clean ---
-                status.write("📥 Fetching and Cleaning tickets...")
-                
                 start_date = date_range[0]
                 end_date = date_range[1] if len(date_range) > 1 else datetime.now().date()
                 start_date_iso = start_date.isoformat()
-                end_date_iso = end_date.isoformat() 
-                
-                cleaned_data = [] 
-                
-                progress_text = status.empty() 
+                end_date_iso = end_date.isoformat()
+
+                cleaned_data = []
+
+                progress_text = status.empty()
                 progress_state = {"count": 0}
-                
+
                 def update_ui_progress(new_count):
                     progress_state["count"] += new_count
                     current = progress_state["count"]
-                    progress_text.markdown(f"**📥 Processing... (Currently: {current} tickets)**")
+                    progress_text.markdown(f"**📥 Fetching and Cleaning tickets... (Currently: {current} tickets)**")
 
                 for name in selected_names:
                     cid = options[name]
@@ -148,15 +142,14 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                     st.error("No tickets found.")
                     st.stop()
                     
-                # --- Step 3: Routing ---
                 status.write(f"🚦 Routing Intents ({current_provider})...")
-                buckets = ai_engine.run_routing(cleaned_data, ai_key, provider=current_provider)
                 
-                # --- Step 4: Clustering ---
+                # --- UPDATED: Use intent_router ---
+                buckets = intent_router.run_routing(cleaned_data, ai_key, provider=current_provider)
+                
                 status.write(f"🧠 Clustering Sub-topics ({current_provider})...")
                 final_data = []
                 
-                # We hardcode 0 to enforce Auto-Discovery via Silhouette Score
                 n_feat, n_prob, n_howto = 0, 0, 0
                 
                 cats = [
@@ -168,8 +161,8 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                 for name, data, n in cats:
                     if data:
                         if len(data) > 5:
-                            # 0 triggers auto-detection in ai_engine
-                            res = ai_engine.cluster_and_label_intent(name, data, n, ai_key, provider=current_provider)
+                            # --- UPDATED: Use clustering_engine ---
+                            res = clustering_engine.cluster_and_label_intent(name, data, n, ai_key, provider=current_provider)
                             final_data.extend(res)
                         else:
                              for item in data:
@@ -177,15 +170,11 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                                  item['cluster_reasoning'] = "Too few items to cluster"
                              final_data.extend(data)
                 
-                # --- Step 5: Post-Processing & Prompt Generation ---
                 if final_data:
                     df_temp = pd.DataFrame(final_data)
                     
-                    # --- PRODUCTION SLUGS ---
-                    # 1. category_slug
                     df_temp['category_slug'] = df_temp['intent']
                     
-                    # 2. sub_category_slug
                     def make_slug(text):
                         if not isinstance(text, str): return ""
                         slug = text.lower().strip()
@@ -197,14 +186,12 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                     
                     st.session_state.final_df = df_temp
                     
-                    # 5A. Generate Definitions
                     status.write("📝 Auto-generating Prompt Definitions...")
                     definitions_md = prompt_generator.generate_classification_prompt(
                         df_temp, ai_key, provider=current_provider
                     )
                     st.session_state.generated_definitions = definitions_md
 
-                    # 5B. Run Validation
                     status.write("🧪 Validating on 20 random tickets...")
                     val_df = prompt_generator.validate_prompt(
                         df_temp, definitions_md, ai_key, provider=current_provider
@@ -229,7 +216,6 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                     st.rerun()
                 raise e
 
-# --- RESULTS VIEW ---
 if st.session_state.data_stage == "analyzed" and st.session_state.final_df is not None:
     st.divider()
     st.subheader("📊 Analysis Results")
@@ -240,14 +226,12 @@ if st.session_state.data_stage == "analyzed" and st.session_state.final_df is no
         df.sort_values(by="created_at", ascending=False, inplace=True)
         df["created_at"] = df["created_at"].apply(lambda x: x.strftime('%b %d, %Y') if pd.notnull(x) else "")
 
-    # 1. High-Level Metrics
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Tickets", len(df))
     m2.metric("Feature Requests", len(df[df['intent'] == 'feature_request']))
     m3.metric("Problem Reports", len(df[df['intent'] == 'problem_report']))
     m4.metric("How-To Questions", len(df[df['intent'] == 'how_to_question']))
     
-    # 2. Detailed Cluster Breakdown
     st.divider()
     st.markdown("### 🧩 Deep Dive: Top Themes")
     
@@ -270,7 +254,6 @@ if st.session_state.data_stage == "analyzed" and st.session_state.final_df is no
             else:
                 st.caption("No tickets found.")
     
-    # --- VALIDATION & PROMPTS SECTION ---
     st.divider()
     st.markdown("### 🧪 Validation & Inference Prompt")
     
@@ -307,7 +290,6 @@ if st.session_state.data_stage == "analyzed" and st.session_state.final_df is no
         else:
             st.warning("Validation data missing.")
 
-    # 3. Full Data Table
     st.divider()
     st.markdown("### 📋 Detailed Ticket Log")
     st.dataframe(
