@@ -149,15 +149,15 @@ elif st.session_state.data_stage in ["connected", "extracted", "analyzed"]:
                 
                 status.write(f"🧠 Clustering Sub-topics ({current_provider})...")
                 final_data = []
-                
+
                 n_feat, n_prob, n_howto = 0, 0, 0
-                
+
                 cats = [
                     ("feature_request", buckets.get('feature_request', []), n_feat),
                     ("problem_report", buckets.get('problem_report', []), n_prob),
                     ("how_to_question", buckets.get('how_to_question', []), n_howto)
                 ]
-                
+
                 for name, data, n in cats:
                     if data:
                         if len(data) > 5:
